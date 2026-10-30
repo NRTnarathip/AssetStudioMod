@@ -42,6 +42,19 @@ namespace AssetStudio
 
             var m_MainAsset = new AssetInfo(reader);
 
+            if (reader.assetsFile.IsAovBundle)
+            {
+                // AOV inserts an extra "new path container" between m_MainAsset
+                // and m_RuntimeCompatibility. It is stored as a map of
+                // (uint32 hash, AssetInfo) pairs.
+                var m_newPathContainerSize = reader.ReadInt32();
+                for (var i = 0; i < m_newPathContainerSize; i++)
+                {
+                    reader.ReadUInt32(); // path/name hash
+                    new AssetInfo(reader);
+                }
+            }
+
             if (version == (5, 4)) //5.4.x
             {
                 var m_ClassVersionMapSize = reader.ReadInt32();

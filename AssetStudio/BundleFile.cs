@@ -77,6 +77,10 @@ namespace AssetStudio
         public Header m_Header;
         private StorageBlock[] m_BlocksInfo;
         private Node[] m_DirectoryInfo;
+        private bool m_IsAov;
+
+        /// <summary>True when the bundle used the AOV (Arena of Valor) container variant.</summary>
+        public bool IsAov => m_IsAov;
 
         public List<StreamFile> fileList;
 
@@ -130,7 +134,7 @@ namespace AssetStudio
                     
                     ReadBlocksInfoAndDirectory(reader, unityVer);
 
-                    if (IsUncompressedBundle && !IsDataAfterBundle && !isMultiBundle)
+                    if (IsUncompressedBundle && !IsDataAfterBundle && !isMultiBundle && !m_IsAov)
                     {
                         Logger.Debug($"[Uncompressed bundle] BlockData count: {m_BlocksInfo.Length}");
                         ReadFiles(reader.BaseStream, reader.Position);
@@ -256,14 +260,70 @@ namespace AssetStudio
 
         private void ReadHeader(FileReader reader)
         {
-            m_Header.size = reader.ReadInt64();
-            m_Header.compressedBlocksInfoSize = reader.ReadUInt32();
-            m_Header.uncompressedBlocksInfoSize = reader.ReadUInt32();
+            var headerBytes = reader.ReadBytes(16);
             m_Header.flags = (ArchiveFlags)reader.ReadUInt32();
             if (m_Header.signature != "UnityFS")
             {
                 reader.ReadByte();
             }
+
+            m_IsAov = TryReadAovHeader(headerBytes, reader.BaseStream.Length,
+                out var aovSize, out var aovCompressedSize, out var aovUncompressedSize);
+
+            if (m_IsAov)
+            {
+                m_Header.size = aovSize;
+                m_Header.compressedBlocksInfoSize = aovCompressedSize;
+                m_Header.uncompressedBlocksInfoSize = aovUncompressedSize;
+                Logger.Debug($"AOV bundle detected. Header decrypted: size={aovSize}, " +
+                             $"compressedBlocksInfoSize={aovCompressedSize}, " +
+                             $"uncompressedBlocksInfoSize={aovUncompressedSize}");
+            }
+            else
+            {
+                using (var headerReader = new EndianBinaryReader(new MemoryStream(headerBytes), EndianType.BigEndian))
+                {
+                    m_Header.size = headerReader.ReadInt64();
+                    m_Header.compressedBlocksInfoSize = headerReader.ReadUInt32();
+                    m_Header.uncompressedBlocksInfoSize = headerReader.ReadUInt32();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Detect and decrypt the AOV variant of the UnityFS header. The header
+        /// is only encrypted when the version dependent "encrypted" flag is set,
+        /// so the flag doubles as the cheap first check.
+        /// </summary>
+        private bool TryReadAovHeader(byte[] headerBytes, long streamLength,
+            out long size, out uint compressedSize, out uint uncompressedSize)
+        {
+            size = 0;
+            compressedSize = 0;
+            uncompressedSize = 0;
+
+            if (m_Header.signature != "UnityFS")
+                return false;
+
+            var unityVer = m_Header.unityRevision;
+            bool usesNewFlags;
+            if (unityVer.IsStripped || unityVer >= (2022, 1, 1))
+                usesNewFlags = true;
+            else if (unityVer < 2020)
+                usesNewFlags = false;
+            else if (unityVer.Major == 2020)
+                usesNewFlags = unityVer >= (2020, 3, 34);
+            else if (unityVer.Major == 2021)
+                usesNewFlags = unityVer >= (2021, 3, 2);
+            else
+                usesNewFlags = true;
+
+            var encryptedFlag = usesNewFlags ? 0x400u : 0x200u;
+            if (((uint)m_Header.flags & encryptedFlag) == 0)
+                return false;
+
+            return AovCrypto.TryDecryptHeader(headerBytes, streamLength,
+                out size, out compressedSize, out uncompressedSize);
         }
 
         private void ReadBlocksInfoAndDirectory(FileReader reader, UnityVersion unityVer, bool silent = false)
@@ -304,6 +364,12 @@ namespace AssetStudio
             else //0x40 BlocksAndDirectoryInfoCombined
             {
                 blocksInfoBytes = reader.ReadBytes(compressedSize);
+            }
+
+            if (m_IsAov && ((uint)m_Header.flags & AovCrypto.BlockEncryptedFlag) != 0)
+            {
+                Logger.Debug("Decrypting AOV blocks info (SM4)");
+                blocksInfoBytes = AovCrypto.DecryptSm4Cbc(blocksInfoBytes);
             }
             
             var customBlockInfoCompression = _bundleOptions.CustomBlockInfoCompression;
@@ -378,25 +444,56 @@ namespace AssetStudio
                 m_BlocksInfo = new StorageBlock[blocksInfoCount];
                 for (var i = 0; i < blocksInfoCount; i++)
                 {
-                    m_BlocksInfo[i] = new StorageBlock
+                    if (m_IsAov)
                     {
-                        uncompressedSize = blocksInfoReader.ReadUInt32(),
-                        compressedSize = blocksInfoReader.ReadUInt32(),
-                        flags = (StorageBlockFlags)blocksInfoReader.ReadUInt16()
-                    };
+                        // AOV: (u16 flags, u16 unknown, u32 compressed, u32 uncompressed)
+                        var flags = (StorageBlockFlags)blocksInfoReader.ReadUInt16();
+                        blocksInfoReader.ReadUInt16(); // unknown / reserved
+                        m_BlocksInfo[i] = new StorageBlock
+                        {
+                            flags = flags,
+                            compressedSize = blocksInfoReader.ReadUInt32(),
+                            uncompressedSize = blocksInfoReader.ReadUInt32(),
+                        };
+                    }
+                    else
+                    {
+                        m_BlocksInfo[i] = new StorageBlock
+                        {
+                            uncompressedSize = blocksInfoReader.ReadUInt32(),
+                            compressedSize = blocksInfoReader.ReadUInt32(),
+                            flags = (StorageBlockFlags)blocksInfoReader.ReadUInt16()
+                        };
+                    }
                 }
 
                 var nodesCount = blocksInfoReader.ReadInt32();
                 m_DirectoryInfo = new Node[nodesCount];
                 for (var i = 0; i < nodesCount; i++)
                 {
-                    m_DirectoryInfo[i] = new Node
+                    if (m_IsAov)
                     {
-                        offset = blocksInfoReader.ReadInt64(),
-                        size = blocksInfoReader.ReadInt64(),
-                        flags = blocksInfoReader.ReadUInt32(),
-                        path = blocksInfoReader.ReadStringToNull(),
-                    };
+                        // AOV: (i64 size, i64 offset, u32 flags, path)
+                        var size = blocksInfoReader.ReadInt64();
+                        var offset = blocksInfoReader.ReadInt64();
+                        m_DirectoryInfo[i] = new Node
+                        {
+                            size = size,
+                            offset = offset,
+                            flags = blocksInfoReader.ReadUInt32(),
+                            path = blocksInfoReader.ReadStringToNull(),
+                        };
+                    }
+                    else
+                    {
+                        m_DirectoryInfo[i] = new Node
+                        {
+                            offset = blocksInfoReader.ReadInt64(),
+                            size = blocksInfoReader.ReadInt64(),
+                            flags = blocksInfoReader.ReadUInt32(),
+                            path = blocksInfoReader.ReadStringToNull(),
+                        };
+                    }
                 }
             }
             if ((m_Header.flags & ArchiveFlags.BlockInfoNeedPaddingAtStart) != 0)
@@ -448,6 +545,36 @@ namespace AssetStudio
                         compressionType = customBlockCompression;
                     }
                     var debugMsg = $"[{i:D2}] Compression: {compressionType} | UncompressedSize: {blockInfo.uncompressedSize} | CompressedSize: {blockInfo.compressedSize} ";
+
+                    if (m_IsAov && ((uint)blockInfo.flags & AovCrypto.BlockEncryptedFlag) != 0)
+                    {
+                        var encryptedBytes = reader.ReadBytes((int)blockInfo.compressedSize);
+                        var decryptedBytes = AovCrypto.DecryptSm4Cbc(encryptedBytes);
+                        long aovNumWrite;
+                        var aovErrorMsg = string.Empty;
+                        if (compressionType == CompressionType.None)
+                        {
+                            blocksStream.Write(decryptedBytes, 0, decryptedBytes.Length);
+                            aovNumWrite = decryptedBytes.Length;
+                        }
+                        else
+                        {
+                            var aovUncompressedBytes = new byte[blockInfo.uncompressedSize];
+                            aovNumWrite = BundleDecompressionHelper.DecompressBlock(compressionType, decryptedBytes, aovUncompressedBytes, ref aovErrorMsg);
+                            if (aovNumWrite == blockInfo.uncompressedSize)
+                            {
+                                blocksStream.Write(aovUncompressedBytes, 0, (int)blockInfo.uncompressedSize);
+                            }
+                        }
+                        Logger.Debug(debugMsg + "(decrypted)");
+
+                        if (aovNumWrite != blockInfo.uncompressedSize)
+                        {
+                            throw new IOException($"AOV {compressionType} block decompression error. {aovErrorMsg}\n" +
+                                                  $"Write {aovNumWrite} bytes but expected {blockInfo.uncompressedSize} bytes.\n");
+                        }
+                        continue;
+                    }
 
                     long numWrite;
                     var errorMsg = string.Empty;
@@ -512,6 +639,9 @@ namespace AssetStudio
 
         private void UnityCnCheck(FileReader reader, UnityVersion unityVer)
         {
+            if (m_IsAov)
+                return;
+
             if ((m_Header.flags & ArchiveFlags.BlocksInfoAtTheEnd) != 0)
                 return;
 
@@ -548,6 +678,7 @@ namespace AssetStudio
             throw new NotSupportedException("Unsupported bundle file. UnityCN encryption was detected.");
         }
 
-        private bool IsUncompressedBundle => m_BlocksInfo.All(x => (CompressionType)(x.flags & StorageBlockFlags.CompressionTypeMask) == CompressionType.None);
+        private bool IsUncompressedBundle => m_BlocksInfo.All(x => (CompressionType)(x.flags & StorageBlockFlags.CompressionTypeMask) == CompressionType.None
+                                                                    && ((uint)x.flags & AovCrypto.BlockEncryptedFlag) == 0);
     }
 }

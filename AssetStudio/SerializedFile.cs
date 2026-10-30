@@ -28,6 +28,9 @@ namespace AssetStudio
         public List<SerializedType> m_RefTypes;
         public string userInformation;
 
+        /// <summary>True when this serialized file came from an AOV bundle.</summary>
+        public bool IsAovBundle;
+
         public SerializedFile(FileReader reader, AssetsManager assetsManager)
         {
             this.assetsManager = assetsManager;

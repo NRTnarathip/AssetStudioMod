@@ -631,6 +631,12 @@ namespace AssetStudio
                     reader.Position += m_VariableBoneCountWeightsSize * 4; //skip uint[] m_VariableBoneCountWeights
                 }
 
+                // AOV adds an extra reserved field to the Mesh type tree.
+                if (HasTypeTreeNode("m_Reserved32bit"))
+                {
+                    reader.ReadInt32();
+                }
+
                 var m_MeshCompression = reader.ReadByte();
                 if (version >= 4)
                 {
@@ -815,6 +821,12 @@ namespace AssetStudio
 
             if (!assetsFile.assetsManager.MeshLazyLoad)
                 ProcessData();
+        }
+
+        private bool HasTypeTreeNode(string name)
+        {
+            var nodes = serializedType?.m_Type?.m_Nodes;
+            return nodes != null && nodes.Any(x => x.m_Name == name);
         }
 
         public void ProcessData()

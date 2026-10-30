@@ -1,4 +1,5 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
 
 namespace AssetStudio
 {
@@ -45,6 +46,11 @@ namespace AssetStudio
                         var m_StaticShadowCaster = reader.ReadByte();
                     }
                     var m_MotionVectors = reader.ReadByte();
+                    // AOV adds a GI type byte to its renderer type tree.
+                    if (HasTypeTreeNode("m_GIType"))
+                    {
+                        reader.ReadByte();
+                    }
                     var m_LightProbeUsage = reader.ReadByte();
                     var m_ReflectionProbeUsage = reader.ReadByte();
                     if (version >= (2019, 3)) //2019.3 and up
@@ -54,6 +60,11 @@ namespace AssetStudio
                     if (version >= 2020) //2020.1 and up
                     {
                         var m_RayTraceProcedural = reader.ReadByte();
+                    }
+                    // AOV also stores a shadow-mask usage byte here.
+                    if (HasTypeTreeNode("m_UseShadowMask"))
+                    {
+                        reader.ReadByte();
                     }
                     if (version.IsTuanjie) //2022.3.2t3(1.0.0) and up
                     {
@@ -117,6 +128,17 @@ namespace AssetStudio
             if (version >= 5) //5.0 and up
             {
                 var m_LightmapTilingOffsetDynamic = reader.ReadVector4();
+            }
+
+            // AOV's renderers carry custom "Yarp" lightmap data in their
+            // type tree, right before the material list.
+            if (HasTypeTreeNode("m_YarpLightmapScaleAndOffset"))
+            {
+                reader.ReadVector4(); // m_YarpLightmapScaleAndOffset
+                reader.ReadVector4(); // m_YarpLightmapEncodeScale
+                reader.ReadVector3(); // m_YarpLightmapEncodeAdd
+                reader.ReadByte();    // m_YarpLightmapUseEncoding
+                reader.AlignStream();
             }
 
             var m_MaterialsSize = reader.ReadInt32();
@@ -186,6 +208,12 @@ namespace AssetStudio
                     var m_MaskInteraction = reader.ReadInt32();
                 }
             }
+        }
+
+        private bool HasTypeTreeNode(string name)
+        {
+            var nodes = serializedType?.m_Type?.m_Nodes;
+            return nodes != null && nodes.Any(x => x.m_Name == name);
         }
     }
 }

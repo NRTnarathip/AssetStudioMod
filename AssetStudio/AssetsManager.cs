@@ -264,7 +264,7 @@ namespace AssetStudio
             return true;
         }
 
-        private bool LoadAssetsFromMemory(FileReader reader, string originalPath, UnityVersion assetBundleUnityVer = null)
+        private bool LoadAssetsFromMemory(FileReader reader, string originalPath, UnityVersion assetBundleUnityVer = null, bool isAovBundle = false)
         {
             if (!assetsFileListHash.Contains(reader.FileName))
             {
@@ -272,6 +272,7 @@ namespace AssetStudio
                 {
                     var assetsFile = new SerializedFile(reader, this);
                     assetsFile.originalPath = originalPath;
+                    assetsFile.IsAovBundle = isAovBundle;
                     if (assetBundleUnityVer != null && assetsFile.header.m_Version < SerializedFileFormatVersion.Unknown_7)
                     {
                         assetsFile.version = assetBundleUnityVer;
@@ -369,7 +370,7 @@ namespace AssetStudio
                 var subReader = new FileReader(dummyPath, file.stream);
                 if (subReader.FileType == FileType.AssetsFile)
                 {
-                    if (!LoadAssetsFromMemory(subReader, originalPath ?? reader.FullPath, bundleFile.m_Header.unityRevision))
+                    if (!LoadAssetsFromMemory(subReader, originalPath ?? reader.FullPath, bundleFile.m_Header.unityRevision, bundleFile.IsAov))
                         return false;
                 }
                 else

@@ -907,14 +907,22 @@ namespace AssetStudio
                     }
                     var m_DenseClip = m_Clip.m_DenseClip;
                     var streamCount = m_Clip.m_StreamedClip.curveCount;
-                    for (var frameIndex = 0; frameIndex < m_DenseClip.m_FrameCount; frameIndex++)
+                    // AOV clips can carry dense metadata (frame/curve counts) while
+                    // the sample array itself is empty. Skip the dense pass in that
+                    // case instead of reading past the end of the array.
+                    if (m_DenseClip != null
+                        && m_DenseClip.m_SampleArray != null
+                        && m_DenseClip.m_SampleArray.Length >= (long)m_DenseClip.m_FrameCount * m_DenseClip.m_CurveCount)
                     {
-                        var time = m_DenseClip.m_BeginTime + frameIndex / m_DenseClip.m_SampleRate;
-                        var frameOffset = frameIndex * m_DenseClip.m_CurveCount;
-                        for (var curveIndex = 0; curveIndex < m_DenseClip.m_CurveCount;)
+                        for (var frameIndex = 0; frameIndex < m_DenseClip.m_FrameCount; frameIndex++)
                         {
-                            var index = streamCount + curveIndex;
-                            ReadCurveData(iAnim, m_ClipBindingConstant, (int)index, time, m_DenseClip.m_SampleArray, (int)frameOffset, ref curveIndex);
+                            var time = m_DenseClip.m_BeginTime + frameIndex / m_DenseClip.m_SampleRate;
+                            var frameOffset = frameIndex * m_DenseClip.m_CurveCount;
+                            for (var curveIndex = 0; curveIndex < m_DenseClip.m_CurveCount;)
+                            {
+                                var index = streamCount + curveIndex;
+                                ReadCurveData(iAnim, m_ClipBindingConstant, (int)index, time, m_DenseClip.m_SampleArray, (int)frameOffset, ref curveIndex);
+                            }
                         }
                     }
                     if (m_Clip.m_ConstantClip != null)
@@ -940,6 +948,11 @@ namespace AssetStudio
         private void ReadCurveData(ImportedKeyframedAnimation iAnim, AnimationClipBindingConstant m_ClipBindingConstant, int index, float time, float[] data, int offset, ref int curveIndex)
         {
             var binding = m_ClipBindingConstant.FindBinding(index);
+            if (binding == null)
+            {
+                curveIndex++;
+                return;
+            }
             if (binding.typeID == ClassIDType.SkinnedMeshRenderer) //BlendShape
             {
                 var channelName = GetChannelNameFromHash(binding.attribute);
