@@ -24,9 +24,11 @@ namespace AssetStudio
         Dictionary<uint, string> morphChannelNames = new Dictionary<uint, string>();
         private IEqualityComparer<AnimationClip> animationClipEqComparer = new AnimationClip.EqComparer();
         private bool collectAnimationClips;
+        private readonly IEnumerable<string> bonePathAliasRoots;
 
-        public ModelConverter(GameObject m_GameObject, ImageFormat imageFormat, List<AnimationClip> animationList = null)
+        public ModelConverter(GameObject m_GameObject, ImageFormat imageFormat, List<AnimationClip> animationList = null, IEnumerable<string> bonePathAliasRoots = null)
         {
+            this.bonePathAliasRoots = bonePathAliasRoots;
             collectAnimationClips = animationList == null;
             this.imageFormat = imageFormat;
             if (m_GameObject.m_Animator != null)
@@ -138,6 +140,7 @@ namespace AssetStudio
                 }
 
                 CreateBonePathHash(m_Transform);
+                SeedBonePathAliases();
             }
 
             ConvertMeshRenderer(m_Transform);
@@ -1061,6 +1064,35 @@ namespace AssetStudio
             {
                 if (pptr.TryGet(out var child))
                     CreateBonePathHash(child);
+            }
+        }
+
+        // AOV bakes the character root's name into every bone path hash
+        // (e.g. crc("52810_DaMo_Low/Bip001/...")), so clips exported from one
+        // rig variant cannot bind to another variant's hierarchy. Seed the map
+        // with every alias root so cross-variant clips still resolve.
+        private void SeedBonePathAliases()
+        {
+            if (bonePathAliasRoots == null || RootFrame == null)
+                return;
+
+            var rootName = RootFrame.Name;
+            var prefix = rootName + "/";
+            var entries = bonePathHash.Where(kv => kv.Value.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+            foreach (var alias in bonePathAliasRoots)
+            {
+                if (string.IsNullOrEmpty(alias) || alias == rootName)
+                    continue;
+
+                var aliasBytes = Encoding.UTF8.GetBytes(alias);
+                bonePathHash[SevenZip.CRC.CalculateDigest(aliasBytes, 0, (uint)aliasBytes.Length)] = rootName;
+                foreach (var kv in entries)
+                {
+                    var stripped = kv.Value.Substring(prefix.Length);
+                    var full = alias + "/" + stripped;
+                    var bytes = Encoding.UTF8.GetBytes(full);
+                    bonePathHash[SevenZip.CRC.CalculateDigest(bytes, 0, (uint)bytes.Length)] = kv.Value;
+                }
             }
         }
 
