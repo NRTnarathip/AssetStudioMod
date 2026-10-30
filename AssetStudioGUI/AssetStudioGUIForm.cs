@@ -133,6 +133,7 @@ namespace AssetStudioGUI
             ConsoleWindow.RunConsole(Properties.Settings.Default.showConsole);
             InitializeComponent();
             ApplyColorTheme(out isDarkMode);
+            Shown += (s, e) => LayoutAssetSearchBar();
 
             var appAssembly = typeof(Program).Assembly.GetName();
             guiTitle = $"{appAssembly.Name} v{appAssembly.Version}";
@@ -686,6 +687,38 @@ namespace AssetStudioGUI
             StatusStripUpdate($"Selected {treeNodeSelectedList.Count} object(s).");
         }
 
+        private void LayoutAssetSearchBar()
+        {
+            if (listSearchHistory == null || listSearch == null)
+            {
+                return;
+            }
+
+            var preferred = listSearchHistory.PreferredHeight;
+            if (preferred <= 0)
+            {
+                preferred = Font.Height + 6;
+            }
+
+            var panelHeight = preferred + 8;
+            if (panel1.Height != panelHeight)
+            {
+                panel1.Height = panelHeight;
+            }
+
+            var searchHeight = Math.Max(16, preferred - 4);
+            listSearch.Height = searchHeight;
+            listSearch.Top = Math.Max(0, (panelHeight - searchHeight) / 2);
+            listSearch.Left = 6;
+
+            // Leave a little room on the right for the history combo's arrow.
+            var width = listSearchHistory.Width - 30;
+            if (width > 40)
+            {
+                listSearch.Width = width;
+            }
+        }
+
         private void listSearch_Enter(object sender, EventArgs e)
         {
             if (listSearch.Text == " Filter ")
@@ -970,7 +1003,7 @@ namespace AssetStudioGUI
                 var bitmap = new DirectBitmap(image);
                 image.Dispose();
 
-                assetItem.InfoText = 
+                assetItem.InfoText =
                     $"Width: {m_Texture2D.m_Width}" +
                     $"\nHeight: {m_Texture2D.m_Height}" +
                     $"\nFormat: {m_Texture2D.m_TextureFormat}";
@@ -1178,7 +1211,7 @@ namespace AssetStudioGUI
             _ = system.getMasterChannelGroup(out var channelGroup);
             result = system.playSound(sound, channelGroup, paused, out channel);
             if (ERRCHECK(result)) return;
-            if (!paused) 
+            if (!paused)
             {
                 timer.Start();
             }
@@ -1325,8 +1358,6 @@ namespace AssetStudioGUI
 
             if (m_Mesh.m_VertexCount > 0)
             {
-                viewMatrixData = Matrix4.CreateRotationY(-MathF.PI / 4) * Matrix4.CreateRotationX(-MathF.PI / 6);
-
                 #region Vertices
                 if (m_Mesh.m_Vertices == null || m_Mesh.m_Vertices.Length == 0)
                 {
@@ -1368,6 +1399,23 @@ namespace AssetStudioGUI
                     offset[i] = (max[i] + min[i]) / 2;
                 }
                 float d = Math.Max(1e-5f, dist.Length);
+
+                // AOV character meshes are authored Z-up (height along +Z) while
+                // most Unity meshes are Y-up. Pick an initial camera that shows
+                // the model standing upright and facing the viewer.
+                if (dist.Z > dist.Y)
+                {
+                    // Z-up: rotate +Z to +Y (upright), then turn 180° so the
+                    // character faces the camera instead of showing its back.
+                    //viewMatrixData = Matrix4.CreateRotationY(MathF.PI) * Matrix4.CreateRotationX(-MathF.PI / 2);
+                    viewMatrixData = Matrix4.CreateRotationY(MathF.PI) * Matrix4.CreateRotationX(MathF.PI / 2);
+                }
+                else
+                {
+                    // Stock Y-up orientation: a slightly rotated three-quarter view.
+                    viewMatrixData = Matrix4.CreateRotationY(-MathF.PI / 4) * Matrix4.CreateRotationX(-MathF.PI / 6);
+                }
+
                 modelMatrixData = Matrix4.CreateTranslation(-offset) * Matrix4.CreateScale(2f / d);
                 #endregion
 
@@ -2030,7 +2078,7 @@ namespace AssetStudioGUI
                         var regexOptions = RegexOptions.IgnoreCase | RegexOptions.Singleline;
                         try
                         {
-                            visibleAssets = mode == ListSearchFilterMode.RegexName 
+                            visibleAssets = mode == ListSearchFilterMode.RegexName
                                 ? visibleAssets.FindAll(x => Regex.IsMatch(x.Text, pattern, regexOptions))
                                 : visibleAssets.FindAll(x => Regex.IsMatch(x.SubItems[1].Text, pattern, regexOptions));
 
@@ -2489,7 +2537,7 @@ namespace AssetStudioGUI
                 case CompressionType.Lzma: return 4;
                 case CompressionType.Lz4:
                 case CompressionType.Lz4HC: return 3;
-                case CompressionType.Zstd:  return 1;
+                case CompressionType.Zstd: return 1;
                 case CompressionType.Oodle: return 2;
                 default: throw new NotSupportedException();
             }
@@ -3176,6 +3224,11 @@ namespace AssetStudioGUI
             GL.BindVertexArray(0);
             GL.Flush();
             glControl1.SwapBuffers();
+        }
+
+        private void tabPage2_Click(object sender, EventArgs e)
+        {
+
         }
 
         private void glControl1_MouseWheel(object sender, MouseEventArgs e)
