@@ -134,6 +134,7 @@ namespace AssetStudioGUI
             InitializeComponent();
             ApplyColorTheme(out isDarkMode);
             Shown += (s, e) => LayoutAssetSearchBar();
+            AddAovMenu();
 
             var appAssembly = typeof(Program).Assembly.GetName();
             guiTitle = $"{appAssembly.Name} v{appAssembly.Version}";
@@ -754,6 +755,22 @@ namespace AssetStudioGUI
                     delayTimer.Start();
                 }
             }
+        }
+
+        // AOV/RoV helper tools (Hero FBX exporter etc.)
+        private void AddAovMenu()
+        {
+            var aovMenu = new ToolStripMenuItem("AOV");
+            var heroExportItem = new ToolStripMenuItem("Hero FBX Exporter...");
+            heroExportItem.Click += (s, e) =>
+            {
+                using (var form = new AovHeroExportForm())
+                {
+                    form.ShowDialog(this);
+                }
+            };
+            aovMenu.DropDownItems.Add(heroExportItem);
+            menuStrip1.Items.Insert(4, aovMenu);
         }
 
         private void delayTimer_Elapsed(object sender, ElapsedEventArgs e)

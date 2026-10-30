@@ -65,3 +65,15 @@ Key facts learned while debugging:
 animators with resolved/unresolved Avatars, rig roots, per-bundle clip
 inventory, clip data layout (streamed/dense/constant/ACL) and conversion
 statistics. Use it when a new hero exports with missing animations.
+
+## GUI: "AOV → Hero FBX Exporter"
+
+The same pipeline ships inside AssetStudioGUI as a dialog:
+
+- Menu: **AOV → Hero FBX Exporter...** (inserted into the main menu strip by `AssetStudioGUIForm.AddAovMenu`).
+- Form: `AssetStudioGUI/AovHeroExportForm.cs` (no Designer file; layout built in code).
+- Fields: game folder, output folder, hero id prefix, rig filter (auto-filled when you click a rig in the list), clip regex, clip source (`all`/`hero`/`bundle`), FBX scale factor / bone size, export-animations toggle.
+- **Scan rigs** loads every bundle matching `<heroId>*.assetbundle` under the game folder (prefix match includes skins), then lists rig roots with clip counts (gray = no clips).
+- **Export FBX** converts the selected rig — richest clip duplicates win, cross-rig bone path aliases are seeded, output `<rig>.fbx` lands in the output folder.
+- Build: `dotnet build AssetStudioGUI -c Debug -f net8.0-windows -p:SolutionDir="<repo>\"` (only Debug native builds exist; Release needs the native projects built first).
+- Headless smoke test: `Tools/AovGuiSmokeTest` drives the real form (scan + export) via reflection; expects bundles in `F:\AOV-Hack\gui_quick` and writes to `F:\AOV-Hack\gui_smoke_out` (verified: 33 actions / 36,620 keyframes from the base Damo rig).
