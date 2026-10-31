@@ -46,7 +46,11 @@ namespace AovHeroScan
             foreach (var animator in objects.Where(o => o.type == ClassIDType.Animator).Cast<Animator>())
             {
                 if (!animator.m_Avatar.TryGet(out var avatar))
+                {
+                    var go0 = animator.m_GameObject.TryGet(out var g0) ? g0.m_Name : "?";
+                    Console.WriteLine($"GO='{go0}'  Avatar=UNRESOLVED (path_id={animator.m_Avatar.m_PathID})  HasTransformHierarchy={animator.m_HasTransformHierarchy}  [{Src(animator.assetsFile)}]");
                     continue;
+                }
 
                 var goName = animator.m_GameObject.TryGet(out var go) ? go.m_Name : "?";
                 var ctrlState = animator.m_Controller.TryGet(out var ctrl)

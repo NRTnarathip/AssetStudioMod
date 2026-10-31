@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using AssetStudio;
 
 namespace AovHeroExport
@@ -67,15 +68,14 @@ namespace AovHeroExport
                 .ToDictionary(
                     g => g.Key,
                     g => g.GroupBy(c => c.m_Name, StringComparer.OrdinalIgnoreCase)
-                          .Aggregate((IEnumerable<AnimationClip>)null, (best, grp) =>
-                              best == null ? grp : MergeByName(best, grp))
+                          .Select(grp => grp.ToList())
                           .ToList());
 
             var allClips = objects
                 .Where(o => o.type == ClassIDType.AnimationClip)
                 .Cast<AnimationClip>()
                 .GroupBy(c => c.m_Name, StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.Aggregate(PickRicher))
+                .Select(g => g.ToList())
                 .ToList();
 
             var clipsByHero = objects
@@ -85,7 +85,7 @@ namespace AovHeroExport
                 .ToDictionary(
                     g => g.Key,
                     g => g.GroupBy(c => c.m_Name, StringComparer.OrdinalIgnoreCase)
-                          .Select(g2 => g2.Aggregate(PickRicher))
+                          .Select(g2 => g2.ToList())
                           .ToList());
 
             // Topmost transform of every hierarchy that owns a SkinnedMeshRenderer = rig root candidate.
@@ -113,10 +113,38 @@ namespace AovHeroExport
                 .OrderBy(r => r.m_Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
+            // Per-rig path-hash sets (full path + every suffix, same as
+            // ModelConverter.CreateBonePathHash) used to pick the clip variant
+            // whose bindings actually resolve against this rig.
+            var rootHashes = new Dictionary<GameObject, HashSet<uint>>();
+            foreach (var root in matched)
+            {
+                var set = new HashSet<uint>();
+                void Walk(Transform t, string path)
+                {
+                    var goName = t.m_GameObject.TryGet(out var g) ? g.m_Name : "?";
+                    var full = path.Length == 0 ? goName : path + "/" + goName;
+                    var name = full;
+                    while (true)
+                    {
+                        var bytes = Encoding.UTF8.GetBytes(name);
+                        set.Add(SevenZip.CRC.CalculateDigest(bytes, 0, (uint)bytes.Length));
+                        var idx = name.IndexOf('/');
+                        if (idx < 0) break;
+                        name = name.Substring(idx + 1);
+                    }
+                    foreach (var child in t.m_Children)
+                        if (child.TryGet(out var ct))
+                            Walk(ct, full);
+                }
+                Walk(root.m_Transform, "");
+                rootHashes[root] = set;
+            }
+
             Console.WriteLine($"Rig roots matching '{filter}': {matched.Count}");
             foreach (var root in matched)
             {
-                var clips = ClipsForRoot(objects, root, clipsByBundle, clipsByHero, allClips, clipSource, clipRegex);
+                var clips = ClipsForRoot(objects, root, rootHashes[root], clipsByBundle, clipsByHero, allClips, clipSource, clipRegex);
                 Console.WriteLine($"  Root '{root.m_Name}'  [{Src(root.assetsFile)}]  clips={clips.Count}");
                 if (mode == "list")
                 {
@@ -128,13 +156,15 @@ namespace AovHeroExport
             if (mode == "list")
                 return 0;
             var diagOnly = mode == "diag";
+            if (diagOnly)
+                matched = matched.Where(r => !IsOptimizedRig(r)).ToList();
 
             Directory.CreateDirectory(output);
             var failed = 0;
             foreach (var root in matched)
             {
                 if (diagOnly && root != matched.First()) break;
-                var clips = ClipsForRoot(objects, root, clipsByBundle, clipsByHero, allClips, clipSource, clipRegex);
+                var clips = ClipsForRoot(objects, root, rootHashes[root], clipsByBundle, clipsByHero, allClips, clipSource, clipRegex);
                 if (clips.Count == 0)
                 {
                     Console.WriteLine($"Skipping '{root.m_Name}' [{Src(root.assetsFile)}] (no clips in source bundle)");
@@ -186,9 +216,10 @@ namespace AovHeroExport
                 return 0;
             var streamed = data.m_StreamedClip?.data?.Length ?? 0;
             var dense = data.m_DenseClip?.m_SampleArray?.Length ?? 0;
+            var denseOpt = data.m_DenseClip?.m_SampleOptArray?.Length ?? 0;
             var constant = data.m_ConstantClip?.data?.Length ?? 0;
             var bindings = c.m_ClipBindingConstant?.genericBindings?.Count ?? 0;
-            return streamed + dense + constant + bindings * 4;
+            return streamed + dense + denseOpt + constant + bindings * 4;
         }
 
         private static AnimationClip PickRicher(AnimationClip a, AnimationClip b)
@@ -200,19 +231,6 @@ namespace AovHeroExport
                 return "";
             var i = bundle.IndexOf('_');
             return i > 0 ? bundle.Substring(0, i) : bundle;
-        }
-
-        private static IEnumerable<AnimationClip> MergeByName(IEnumerable<AnimationClip> a, IEnumerable<AnimationClip> b)
-        {
-            var map = a.ToDictionary(c => c.m_Name, c => c, StringComparer.OrdinalIgnoreCase);
-            foreach (var c in b)
-            {
-                if (map.TryGetValue(c.m_Name, out var cur))
-                    map[c.m_Name] = PickRicher(cur, c);
-                else
-                    map[c.m_Name] = c;
-            }
-            return map.Values;
         }
 
         private static string BundleOf(GameObject root)
@@ -237,37 +255,83 @@ namespace AovHeroExport
             return false;
         }
 
+        // Optimized-hierarchy rigs need an Avatar to deoptimize; AOV strips it,
+        // so these can only be exported via their raw_h twin.
+        private static bool IsOptimizedRig(GameObject root)
+        {
+            return root.m_Animator != null && !root.m_Animator.m_HasTransformHierarchy
+                && !root.m_Animator.m_Avatar.TryGet(out _);
+        }
+
         private static List<AnimationClip> ClipsForRoot(
             AssetStudio.Object[] objects,
             GameObject root,
-            Dictionary<string, List<AnimationClip>> clipsByBundle,
-            Dictionary<string, List<AnimationClip>> clipsByHero,
-            List<AnimationClip> allClips,
+            HashSet<uint> rootHashes,
+            Dictionary<string, List<List<AnimationClip>>> clipsByBundle,
+            Dictionary<string, List<List<AnimationClip>>> clipsByHero,
+            List<List<AnimationClip>> allClips,
             string clipSource,
             System.Text.RegularExpressions.Regex clipRegex)
         {
-            List<AnimationClip> clips;
+            List<List<AnimationClip>> variants;
             if (clipSource == "hero")
             {
                 // AOV splits a character across several bundles sharing the same
                 // numeric prefix: rig in "*_base", clips in "*_base_low_raw_h".
-                clips = clipsByHero.TryGetValue(HeroKey(BundleOf(root)), out var c) ? c : new List<AnimationClip>();
+                variants = clipsByHero.TryGetValue(HeroKey(BundleOf(root)), out var c) ? c : new List<List<AnimationClip>>();
             }
             else if (clipSource == "bundle")
             {
                 // All clips from the same physical bundle as the rig root (a bundle can
                 // contain several serialized files, clips may live in a different CAB
                 // than the rig).
-                clips = clipsByBundle.TryGetValue(BundleOf(root), out var c) ? c : new List<AnimationClip>();
+                variants = clipsByBundle.TryGetValue(BundleOf(root), out var c) ? c : new List<List<AnimationClip>>();
             }
             else
             {
-                clips = allClips;
+                variants = allClips;
             }
+
+            var clips = variants
+                .Select(group => PickBestVariant(group, rootHashes))
+                .Where(c => c != null)
+                .ToList();
 
             if (clipRegex != null)
                 clips = clips.Where(c => clipRegex.IsMatch(c.m_Name)).ToList();
             return clips;
+        }
+
+        // Same clip name ships in several variants bound to different rigs (bone
+        // path hashes differ per skin/LOD). Pick the variant whose bindings most
+        // fully resolve against THIS rig's path hashes; fall back to raw data size.
+        private static AnimationClip PickBestVariant(List<AnimationClip> variants, HashSet<uint> rootHashes)
+        {
+            AnimationClip best = null;
+            var bestScore = -1L;
+            foreach (var clip in variants)
+            {
+                long resolved = 0;
+                var seen = new HashSet<uint>();
+                var bindings = clip.m_ClipBindingConstant?.genericBindings;
+                if (bindings != null)
+                {
+                    foreach (var b in bindings)
+                    {
+                        if (!seen.Add(b.path))
+                            continue;
+                        if (rootHashes.Contains(b.path))
+                            resolved++;
+                    }
+                }
+                var score = resolved * 1_000_000_000L + ClipRichness(clip);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = clip;
+                }
+            }
+            return best;
         }
 
         private static void ExportFbx(IImported convert, string exportPath)

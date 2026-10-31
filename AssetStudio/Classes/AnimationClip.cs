@@ -608,6 +608,13 @@ namespace AssetStudio
         }
     }
 
+    public class DenseCurveInfo
+    {
+        public float m_CurveMinimum;
+        public float m_CurveScale;
+        public int m_CurveType;
+    }
+
     public class DenseClip
     {
         public int m_FrameCount;
@@ -615,6 +622,9 @@ namespace AssetStudio
         public float m_SampleRate;
         public float m_BeginTime;
         public float[] m_SampleArray;
+        // Tencent (AOV) optimized dense: quantized samples + per-curve (min, scale, type)
+        public ushort[] m_SampleOptArray;
+        public DenseCurveInfo[] m_SampleCurveInfoArray;
 
         public DenseClip() { }
 

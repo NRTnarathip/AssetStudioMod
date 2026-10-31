@@ -913,9 +913,13 @@ namespace AssetStudio
                     // AOV clips can carry dense metadata (frame/curve counts) while
                     // the sample array itself is empty. Skip the dense pass in that
                     // case instead of reading past the end of the array.
+                    // Tencent's optimized dense keeps quantized samples in
+                    // m_SampleOptArray with per-curve (min, scale, type) metadata;
+                    // decode them back to floats before the dense pass.
+                    var denseArray = DecodeQuantizedDense(m_DenseClip) ?? m_DenseClip?.m_SampleArray;
                     if (m_DenseClip != null
-                        && m_DenseClip.m_SampleArray != null
-                        && m_DenseClip.m_SampleArray.Length >= (long)m_DenseClip.m_FrameCount * m_DenseClip.m_CurveCount)
+                        && denseArray != null
+                        && denseArray.Length >= (long)m_DenseClip.m_FrameCount * m_DenseClip.m_CurveCount)
                     {
                         for (var frameIndex = 0; frameIndex < m_DenseClip.m_FrameCount; frameIndex++)
                         {
@@ -924,7 +928,7 @@ namespace AssetStudio
                             for (var curveIndex = 0; curveIndex < m_DenseClip.m_CurveCount;)
                             {
                                 var index = streamCount + curveIndex;
-                                ReadCurveData(iAnim, m_ClipBindingConstant, (int)index, time, m_DenseClip.m_SampleArray, (int)frameOffset, ref curveIndex);
+                                ReadCurveData(iAnim, m_ClipBindingConstant, (int)index, time, denseArray, (int)frameOffset, ref curveIndex);
                             }
                         }
                     }
@@ -945,6 +949,148 @@ namespace AssetStudio
                     }
                 }
                 Console.Write($"Converted [{k+1}/{totalCount}] animations\r");
+            }
+        }
+
+        // Tencent (AOV) optimized dense: m_SampleOptArray holds quantized samples,
+        // m_SampleCurveInfoArray one (min, scale, type) per curve. m_CurveType packs
+        // the quantization bit width in the high byte and the value layout in the
+        // low byte (1 = smallest-three quaternion, 2 = Vector3, 3 = scalar). Every
+        // sample decodes as minimum + code * scale; frames are bit-packed LSB-first
+        // and aligned to 16 bits. Returns null when the clip is not quantized.
+        private static float[] DecodeQuantizedDense(DenseClip dense)
+        {
+            if (dense == null)
+                return null;
+            if (dense.m_SampleArray != null && dense.m_SampleArray.Length > 0)
+                return null; // classic float dense
+            var packed = dense.m_SampleOptArray;
+            var infos = dense.m_SampleCurveInfoArray;
+            if (packed == null || packed.Length == 0 || infos == null || infos.Length == 0)
+                return null;
+
+            var frameCount = dense.m_FrameCount;
+            var curveCount = (int)dense.m_CurveCount;
+            if (frameCount <= 0 || curveCount <= 0)
+                return null;
+
+            var result = new List<float>(frameCount * curveCount);
+            var scalarWordLayout = packed.Length == frameCount * curveCount;
+            if (scalarWordLayout)
+            {
+                foreach (var info in infos)
+                {
+                    if ((info.m_CurveType >> 8) != 0)
+                    {
+                        scalarWordLayout = false;
+                        break;
+                    }
+                }
+            }
+            if (scalarWordLayout)
+            {
+                var cursor = 0;
+                for (var frame = 0; frame < frameCount; frame++)
+                {
+                    foreach (var info in infos)
+                    {
+                        var components = ComponentCount(info.m_CurveType & 0xFF);
+                        for (var component = 0; component < components; component++)
+                        {
+                            result.Add(packed[cursor++] * info.m_CurveScale + info.m_CurveMinimum);
+                        }
+                    }
+                }
+                return result.ToArray();
+            }
+
+            var reader = new LsbBitReader(packed);
+            for (var frame = 0; frame < frameCount; frame++)
+            {
+                foreach (var info in infos)
+                {
+                    var bitWidth = info.m_CurveType >> 8;
+                    var layoutType = info.m_CurveType & 0xFF;
+                    var minimum = info.m_CurveMinimum;
+                    var scale = info.m_CurveScale;
+                    if (layoutType == 1)
+                    {
+                        // three smallest quaternion components, then two bits for the
+                        // omitted component index and one sign bit for the reconstructed
+                        // component; q and -q encode the same rotation but the sign
+                        // preserves curve continuity before interpolation
+                        var c0 = reader.Read(bitWidth) * scale + minimum;
+                        var c1 = reader.Read(bitWidth) * scale + minimum;
+                        var c2 = reader.Read(bitWidth) * scale + minimum;
+                        var metadata = reader.Read(3);
+                        var omitted = metadata & 0x3;
+                        var missing = MathF.Sqrt(MathF.Max(0f, 1f - c0 * c0 - c1 * c1 - c2 * c2));
+                        if ((metadata & 0x4) != 0)
+                            missing = -missing;
+                        switch (omitted)
+                        {
+                            case 0: result.Add(missing); result.Add(c0); result.Add(c1); result.Add(c2); break;
+                            case 1: result.Add(c0); result.Add(missing); result.Add(c1); result.Add(c2); break;
+                            case 2: result.Add(c0); result.Add(c1); result.Add(missing); result.Add(c2); break;
+                            default: result.Add(c0); result.Add(c1); result.Add(c2); result.Add(missing); break;
+                        }
+                    }
+                    else if (layoutType == 2)
+                    {
+                        for (var component = 0; component < 3; component++)
+                            result.Add(reader.Read(bitWidth) * scale + minimum);
+                    }
+                    else if (layoutType == 3)
+                    {
+                        result.Add(reader.Read(bitWidth) * scale + minimum);
+                    }
+                    else
+                    {
+                        Logger.Warning($"Unsupported optimized dense curve layout: 0x{info.m_CurveType:X4}");
+                        return null;
+                    }
+                }
+                reader.AlignToWord();
+            }
+            if (result.Count != frameCount * curveCount)
+            {
+                Logger.Warning($"Optimized dense decode size mismatch: {result.Count} != {frameCount * curveCount}");
+                return null;
+            }
+            return result.ToArray();
+        }
+
+        private static int ComponentCount(int layoutType)
+        {
+            return layoutType == 1 ? 4 : layoutType == 2 ? 3 : 1;
+        }
+
+        // reads bits LSB-first across a uint16 array (Unity's packed-data convention)
+        private sealed class LsbBitReader
+        {
+            private readonly ushort[] _words;
+            private int _offset;
+
+            public LsbBitReader(ushort[] words)
+            {
+                _words = words;
+            }
+
+            public int Read(int count)
+            {
+                int value = 0;
+                for (var bit = 0; bit < count; bit++)
+                {
+                    var word = _words[_offset >> 4];
+                    value |= ((word >> (_offset & 15)) & 1) << bit;
+                    _offset++;
+                }
+                return value;
+            }
+
+            public void AlignToWord()
+            {
+                _offset = (_offset + 15) & ~15;
             }
         }
 
